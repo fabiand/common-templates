@@ -1,0 +1,89 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: inst-fedora28
+  annotations:
+    openshift.io/display-name: "Fedora 28 VM"
+    description: >-
+      This template can be used to create a VM suitable for
+      Fedora 28.
+      The template assumes that a PVC is available which is providing the
+      necessary Fedora disk image.
+
+      Recommended disk image (needs to be converted to raw)
+      https://download.fedoraproject.org/pub/fedora/linux/releases/28/Cloud/x86_64/images/Fedora-Cloud-Base-28-1.1.x86_64.qcow2
+    tags: "kubevirt,virtualmachine,fedora"
+    iconClass: "icon-fedora"
+    openshift.io/provider-display-name: "KubeVirt"
+    openshift.io/documentation-url: "https://github.com/fabiand/common-templates"
+    openshift.io/support-url: "https://github.com/fabiand/common-templates/issues"
+    template.openshift.io/bindable: "false"
+  labels:
+    kubevirt.io/os: inst-fedora28
+objects:
+- kind: Secret
+  apiVersion: v1
+  metadata:
+    name: ${NAME}-parameters
+  stringData:
+    NAME: ${NAME}
+    PVCNAME: ${PVCNAME}
+- kind: TemplateInstance
+  apiVersion: template.openshift.io/v1
+  metadata:
+    name: ${NAME}
+  spec:
+    secret:
+      name: ${NAME}-parameters
+    template:
+      apiVersion: v1
+      kind: Template
+      metadata:
+        name: inst-fedora28
+      objects:
+      - apiVersion: kubevirt.io/v1alpha2
+        kind: VirtualMachine
+        metadata:
+          labels:
+            kubevirt.io/os: inst-fedora28
+          name: ${NAME}
+        spec:
+          running: false
+          template:
+            metadata:
+              labels:
+                kubevirt.io/os: inst-fedora28
+            spec:
+              domain:
+                cpu:
+                  cores: 2
+                devices:
+                  rng: {}
+                  disks:
+                  - disk:
+                      bus: virtio
+                    name: rootdisk
+                    volumeName: rootvolume
+                resources:
+                  requests:
+                    memory: 2G
+              terminationGracePeriodSeconds: 0
+              volumes:
+              - name: rootvolume
+                persistentVolumeClaim:
+                  claimName: ${PVCNAME}
+              - cloudInitNoCloud:
+                  userData: |-
+                    #cloud-config
+                    password: fedora
+                    chpasswd: { expire: False }
+                name: cloudinitvolume
+parameters:
+- name: NAME
+  description: Name of the new VM
+  generate: expression
+  from: "inst-fedora28-[a-z0-9]{6}"
+  required: true
+- name: PVCNAME
+  description: Name of the PVC with the disk image
+  required: true
