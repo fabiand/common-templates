@@ -1,0 +1,152 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kubenode-bootstrap
+stringData:
+  userdata: |
+    #cloud-config
+    
+    password: centos
+    chpasswd: {expire: False}
+    ssh_pwauth: True
+    ssh_authorized_keys:
+      - $PUBKEY
+    
+    package_upgrade: false
+    
+    runcmd:
+    - |
+      KUBERNETES_VER=v1.11.3
+      KUBEVIRT_VER=v0.8.0
+      
+      PATH=$PATH:/usr/local/bin
+      
+      set -x
+    
+      #hostnamectl set-hostname minikube
+    
+      # from https://kubernetes.io/docs/setup/independent/install-kubeadm/
+      yum install -y docker
+      systemctl enable docker && systemctl start docker
+      
+      cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+      [kubernetes]
+      name=Kubernetes
+      baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+      enabled=1
+      gpgcheck=1
+      repo_gpgcheck=1
+      gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+      exclude=kube*
+      EOF
+      setenforce 0
+      yum install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
+      systemctl enable kubelet && systemctl start kubelet
+      
+      cat <<EOF >  /etc/sysctl.d/k8s.conf
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.bridge.bridge-nf-call-iptables = 1
+      EOF
+      sysctl --system
+
+      kubectl create -f - <<EOM
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: kubevirt-kube-cluster-config
+      data:
+      EOM
+      ARE_MASTER=[[ $? -eq 0 ]] && true || false
+      
+      if $ARE_MASTER;
+      then
+        kubeadm init --pod-network-cidr=10.244.0.0/16
+        kubectl apply -f - <<EOM
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: kubevirt-kube-cluster-config
+        stringData:
+          master: $HOSTNAME
+          joinCommand: |
+            $(kubeadm token create --print-join-command)
+        EOM
+        
+        mkdir -p ~/.kube
+        sudo cat /etc/kubernetes/admin.conf > ~/.kube/config
+        kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/v0.10.0/Documentation/kube-flannel.yml
+        
+        kubectl create configmap -n kube-system kubevirt-config --from-literal debug.useEmulation=true || true
+        kubectl apply -f https://github.com/kubevirt/kubevirt/releases/download/$KUBEVIRT_VER/kubevirt.yaml
+      else
+        kGetConfig() { kubectl get secret kubevirt-kube-cluster-config $@ }
+        getJoinCmd() { kGetConfig -o=jsonpath='{.data.joinCommand}' | base64 -d ; }
+        JOIN_CMD=
+        while [[ -z $JOIN_CMD ]];
+        do
+          echo -n .
+          JOIN_CMD=$(getJoinCmd)
+          sleep 6
+        done
+        eval $(JOIN_CMD)
+      fi
+---
+apiVersion: v1
+kind: Template
+metadata:
+  name: kube-node
+  annotations:
+    openshift.io/display-name: "Red Hat Enterprise Linux 7.5 VM"
+    description: >-
+      This template can be used to create a VM suitable for
+      Red Hat Enterprise Linux 7.5.
+      The template assumes that a PVC is available which is providing the
+      necessary RHEL disk image.
+    tags: "kubevirt,virtualmachine,linux,rhel"
+    iconClass: "icon-rhel"
+    openshift.io/provider-display-name: "KubeVirt"
+    openshift.io/documentation-url: "https://github.com/fabiand/common-templates"
+    openshift.io/support-url: "https://github.com/fabiand/common-templates/issues"
+    template.openshift.io/bindable: "false"
+objects:
+- apiVersion: kubevirt.io/v1alpha2
+  kind: VirtualMachine
+  metadata:
+    name: ${NAME}
+  spec:
+    running: false
+    template:
+      spec:
+        domain:
+          cpu:
+            cores: 2
+          devices:
+            disks:
+            - disk:
+                bus: virtio
+              name: rootdisk
+              volumeName: rootvolume
+            rng: {}
+          resources:
+            requests:
+              memory: 2G
+
+        terminationGracePeriodSeconds: 0
+        volumes:
+        - name: rootvolume
+          ephemeral:
+            persistentVolumeClaim:
+              claimName: ${PVCNAME}
+        - name: cloudinitvolume
+          cloudInitNoCloud:
+            secretRef:
+              name: kubenode-bootstrap
+parameters:
+- name: NAME
+  description: Name of the new VM
+  generate: expression
+  from: "kubenode-[a-z0-9]{6}"
+  required: true
+- name: PVCNAME
+  description: Name of the PVC with the disk image
+  required: true
